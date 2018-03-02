@@ -1,0 +1,24 @@
+package com.taotao.service;
+
+
+import com.taotao.common.pojo.EasyUIDataGridResult;
+import com.taotao.common.pojo.TaotaoResult;
+import com.taotao.pojo.TbItem;
+import com.taotao.pojo.TbItemDesc;
+
+public interface ItemService {
+
+	EasyUIDataGridResult getItemList(int page,int rows);
+	
+	TaotaoResult deleteItemById(int[] ids);
+	
+	TaotaoResult addItem(TbItem item,String desc);
+	
+	TaotaoResult upItem(int[] ids);
+	
+	TaotaoResult downItem(int[] ids);
+	
+	TbItem getTbitemById(long itemId);
+	
+	TbItemDesc getItemDescById(long itemId);
+}

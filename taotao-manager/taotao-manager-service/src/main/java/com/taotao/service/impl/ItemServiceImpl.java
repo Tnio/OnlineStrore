@@ -1,0 +1,201 @@
+package com.taotao.service.impl;
+
+import java.util.Date;
+import java.util.List;
+
+import javax.annotation.Resource;
+import javax.jms.JMSException;
+import javax.jms.Message;
+import javax.jms.Session;
+import javax.jms.TextMessage;
+import javax.jms.Topic;
+
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jms.core.JmsTemplate;
+import org.springframework.jms.core.MessageCreator;
+import org.springframework.stereotype.Service;
+
+import com.github.pagehelper.PageHelper;
+import com.github.pagehelper.PageInfo;
+import com.taotao.common.pojo.EasyUIDataGridResult;
+import com.taotao.common.pojo.TaotaoResult;
+import com.taotao.common.utils.IDUtils;
+import com.taotao.common.utils.JsonUtils;
+import com.taotao.jedis.JedisClient;
+import com.taotao.mapper.TbItemDescMapper;
+import com.taotao.mapper.TbItemMapper;
+import com.taotao.pojo.TbItem;
+import com.taotao.pojo.TbItemDesc;
+import com.taotao.pojo.TbItemExample;
+import com.taotao.service.ItemService;
+
+
+/**
+ * 商品管理service
+ * @author yl
+ */
+
+@Service
+public class ItemServiceImpl implements ItemService {
+
+	@Resource
+	private TbItemMapper itemMapper;
+	@Autowired
+	private TbItemDescMapper itemDescMapper;
+	@Autowired
+	private JmsTemplate jmsTemplate;
+	@Resource(name="topicDestination")
+	private Topic topicDestination;
+	@Autowired
+	private JedisClient jedisClient;
+	@Value("${REDIS_ITEM_KEY}")
+	private String REDIS_ITEM_KEY;
+	@Value("${REDIS_ITME_EXPIRE}")
+	private Integer REDIS_ITME_EXPIRE;
+	
+	/**
+	 *分页查询所有
+	 */
+	public EasyUIDataGridResult getItemList(int page, int rows) {
+		//分页处理
+		PageHelper.startPage(page, rows);
+		TbItemExample example = new TbItemExample();
+		//执行查询
+		List<TbItem> list = itemMapper.selectByExample(example);
+		//创建返回的结果对象
+		EasyUIDataGridResult result = new EasyUIDataGridResult();
+		result.setRows(list);
+		//取总的记录数
+		PageInfo<TbItem> pageInfo = new PageInfo<>(list);
+		result.setTotal(pageInfo.getTotal());
+		
+		return result;
+	}
+
+	/**
+	 * 删除商品
+	 */
+	public TaotaoResult deleteItemById(int[] ids) {
+		for (int i : ids) {
+			Long id = new Long((long)i);
+			itemMapper.deleteByPrimaryKey(id);
+		}
+		return TaotaoResult.ok();
+	}
+	
+	/**
+	 * 上架商品
+	 */
+	public TaotaoResult upItem(int[] ids) {
+		for (int i : ids) {
+			Long id = new Long((long)i);
+			TbItem item = itemMapper.selectByPrimaryKey(id);
+			item.setStatus((byte) 1);
+			itemMapper.updateByPrimaryKey(item);
+		}
+		return TaotaoResult.ok();
+	}
+	
+	/**
+	 * 下架商品
+	 */
+	public TaotaoResult downItem(int[] ids) {
+		for (int i : ids) {
+			Long id = new Long((long)i);
+			TbItem item = itemMapper.selectByPrimaryKey(id);
+			item.setStatus((byte) 2);
+			itemMapper.updateByPrimaryKey(item);
+		}
+		return TaotaoResult.ok();
+	}
+
+	/**
+	 * 添加商品
+	 */
+	public TaotaoResult addItem(TbItem item, String desc) {
+		//生成商品的id
+		final long itemId = IDUtils.genItemId();
+		item.setId(itemId);
+		//商品状态，1正常	2下架		3删除
+		item.setStatus((byte) 1);
+		Date date = new Date();
+		item.setCreated(date);
+		item.setUpdated(date);
+		//插入到商品列表
+		itemMapper.insert(item);
+		//商品的描述
+		TbItemDesc itemDesc = new TbItemDesc();
+		itemDesc.setItemId(itemId);
+		itemDesc.setItemDesc(desc);
+		itemDesc.setCreated(date);
+		itemDesc.setUpdated(date);
+		//插入商品描述
+		itemDescMapper.insert(itemDesc);
+		
+		//插入商品完成之后，发送一个MQ消息，
+		jmsTemplate.send(topicDestination, new MessageCreator() {
+			
+			public Message createMessage(Session session) throws JMSException {
+				//创建一个消息队列
+				TextMessage textMessage = session.createTextMessage(itemId+"");
+				return textMessage;
+			}
+		});
+		
+		return TaotaoResult.ok();
+	}
+
+	public TbItem getTbitemById(long itemId) {
+		//先查询缓存
+		try {
+			String json = jedisClient.get(REDIS_ITEM_KEY+":"+itemId+":BASE");
+			if (StringUtils.isNotBlank(json)) {
+				TbItem tbItem = JsonUtils.jsonToPojo(json,TbItem.class);
+				return tbItem;
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		
+		TbItem tbItem = itemMapper.selectByPrimaryKey(itemId);
+		
+		//查询完数据库之后添加缓存
+		try {
+			jedisClient.set(REDIS_ITEM_KEY+":"+itemId+":BASE",JsonUtils.objectToJson(tbItem));
+			//设置过期时间
+			jedisClient.expire(REDIS_ITEM_KEY+":"+itemId+":BASE", REDIS_ITME_EXPIRE);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		return tbItem;
+	}
+
+	public TbItemDesc getItemDescById(long itemId) {
+		//先查询缓存
+		try {
+			String json = jedisClient.get(REDIS_ITEM_KEY+":"+itemId+":BASE");
+			if (StringUtils.isNotBlank(json)) {
+				TbItemDesc itemDesc = JsonUtils.jsonToPojo(json,TbItemDesc.class);
+				return itemDesc;
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		
+		TbItemDesc itemDesc = itemDescMapper.selectByPrimaryKey(itemId);
+		
+		//查询完数据库之后添加缓存
+		try {
+			jedisClient.set(REDIS_ITEM_KEY+":"+itemId+":DESC",JsonUtils.objectToJson(itemDesc));
+			//设置过期时间
+			jedisClient.expire(REDIS_ITEM_KEY+":"+itemId+":DESC", REDIS_ITME_EXPIRE);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		
+		return itemDesc;
+	}
+
+}
